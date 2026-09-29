@@ -2,3 +2,6 @@ clips/*.mov filter=lfs diff=lfs merge=lfs -text
 pawdoe/raw_clips/*.mov filter=lfs diff=lfs merge=lfs -text
 pawdoe/raw_clips/*.MOV filter=lfs diff=lfs merge=lfs -text
 pawdoe/output_variantes/*.mp4 filter=lfs diff=lfs merge=lfs -text
+pawdoe/raw_clips_v2/*.mov filter=lfs diff=lfs merge=lfs -text
+pawdoe/raw_clips_v2/*.MOV filter=lfs diff=lfs merge=lfs -text
+pawdoe/output_variantes_v2/*.mp4 filter=lfs diff=lfs merge=lfs -text
