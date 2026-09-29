@@ -115,7 +115,7 @@ def concat_fragments(fragment_paths, out_path):
     listfile = out_path + ".txt"
     with open(listfile, "w") as f:
         for p in fragment_paths:
-            f.write(f"file '{p}'\n")
+            f.write(f"file '{os.path.abspath(p)}'\n")
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", out_path],
         check=True, capture_output=True,
