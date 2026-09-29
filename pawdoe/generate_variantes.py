@@ -13,6 +13,7 @@ Requiere ffmpeg y ffprobe en el PATH.
 import argparse
 import glob
 import json
+import math
 import os
 import random
 import subprocess
@@ -64,27 +65,64 @@ def load_clip_pool(input_dir, edge_margin):
 
 
 def plan_fragment_durations(rng, n, total_budget, frag_min, frag_max):
+    """Reparte total_budget entre n fragmentos (cada uno en [frag_min, frag_max]),
+    ajustando sobre la marcha para que la suma quede cerca del objetivo en vez de
+    quedarse corta por defecto."""
     durations = []
     remaining_budget = total_budget
     for i in range(n):
         remaining_after = n - i - 1
-        max_this = min(frag_max, remaining_budget - remaining_after * frag_min)
-        max_this = max(frag_min, max_this)
-        d = round(rng.uniform(frag_min, max_this), 2)
+        target_this = remaining_budget - remaining_after * ((frag_min + frag_max) / 2)
+        lo = max(frag_min, min(frag_max, target_this) - 0.6)
+        hi = min(frag_max, max(frag_min, target_this) + 0.6)
+        if lo > hi:
+            lo, hi = frag_min, frag_max
+        max_feasible = min(hi, remaining_budget - remaining_after * frag_min)
+        max_feasible = max(frag_min, max_feasible)
+        lo = min(lo, max_feasible)
+        d = round(rng.uniform(lo, max_feasible), 2)
         durations.append(d)
         remaining_budget -= d
     return durations
 
 
+def pick_clip_indices(rng, pool_size, n):
+    """Reparte los n fragmentos por toda la carpeta (muestreo estratificado por
+    posición alfabética) para que no salgan varios clips consecutivos seguidos,
+    en vez de un simple shuffle que puede agrupar vecinos por azar."""
+    if n >= pool_size:
+        indices = list(range(pool_size))
+        rng.shuffle(indices)
+        return (indices * (n // pool_size + 1))[:n]
+
+    bounds = [round(i * pool_size / n) for i in range(n + 1)]
+    indices = []
+    for i in range(n):
+        lo, hi = bounds[i], max(bounds[i] + 1, bounds[i + 1])
+        indices.append(rng.randrange(lo, min(hi, pool_size)))
+    rng.shuffle(indices)
+    return indices
+
+
+def reorder_avoiding_adjacent_sources(rng, fragments, max_tries=50):
+    """Evita que dos fragmentos consecutivos en el vídeo final vengan de clips
+    contiguos en la carpeta (p.ej. IMG_8294 seguido de IMG_8295)."""
+    def is_adjacent(a, b):
+        return abs(a["pool_index"] - b["pool_index"]) <= 1
+
+    for _ in range(max_tries):
+        conflicts = [i for i in range(len(fragments) - 1) if is_adjacent(fragments[i], fragments[i + 1])]
+        if not conflicts:
+            break
+        i = conflicts[0]
+        j = rng.randrange(len(fragments))
+        fragments[i + 1], fragments[j] = fragments[j], fragments[i + 1]
+    return fragments
+
+
 def pick_fragments(rng, pool, n, frag_min, frag_max, total_budget):
     durations = plan_fragment_durations(rng, n, total_budget, frag_min, frag_max)
-    clip_indices = list(range(len(pool)))
-    rng.shuffle(clip_indices)
-    if len(clip_indices) < n:
-        clip_indices = (clip_indices * (n // len(clip_indices) + 1))[:n]
-        rng.shuffle(clip_indices)
-    else:
-        clip_indices = clip_indices[:n]
+    clip_indices = pick_clip_indices(rng, len(pool), n)
 
     fragments = []
     for idx, dur in zip(clip_indices, durations):
@@ -93,8 +131,9 @@ def pick_fragments(rng, pool, n, frag_min, frag_max, total_budget):
         dur = min(dur, span)
         latest_start = clip["usable_end"] - dur
         start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
-        fragments.append({"path": clip["path"], "start": round(start, 2), "duration": round(dur, 2)})
+        fragments.append({"path": clip["path"], "start": round(start, 2), "duration": round(dur, 2), "pool_index": idx})
     rng.shuffle(fragments)
+    fragments = reorder_avoiding_adjacent_sources(rng, fragments)
     return fragments
 
 
@@ -124,7 +163,10 @@ def concat_fragments(fragment_paths, out_path):
 
 
 def build_variant(rng, pool, variant_num, args, tmp_dir, out_dir):
-    n_fragments = rng.randint(args.min_fragments, args.max_fragments)
+    min_feasible = math.ceil(args.max_duration / args.frag_max)
+    n_lo = max(args.min_fragments, min_feasible)
+    n_hi = max(n_lo, args.max_fragments)
+    n_fragments = rng.randint(n_lo, n_hi)
     fragments = pick_fragments(rng, pool, n_fragments, args.frag_min, args.frag_max, args.max_duration)
 
     fragment_paths = []
