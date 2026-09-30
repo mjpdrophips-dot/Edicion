@@ -20,14 +20,14 @@
     "IMG_8296.mov": {"beat": "uso", "species": "perro"},
     "IMG_8300.mov": {"beat": "uso", "species": "perro"},
     "IMG_8306.mov": {"beat": "uso", "species": "perro"},
-    "IMG_8307.mov": {"beat": "resultado", "species": "perro"},
+    "IMG_8307.mov": {"beat": "resultado", "species": "perro", "subtype": "captura"},
     "IMG_8308.mov": {"beat": "intro", "species": "perro"},
-    "IMG_8310.mov": {"beat": "resultado", "species": null},
+    "IMG_8310.mov": {"beat": "resultado", "species": null, "subtype": "extraccion"},
     "IMG_8313.mov": {"beat": "producto", "species": null},
-    "IMG_8314.mov": {"beat": "resultado", "species": null},
+    "IMG_8314.mov": {"beat": "resultado", "species": null, "subtype": "limpieza"},
     "IMG_8316.mov": {"beat": "producto", "species": null},
     "IMG_8317.mov": {"beat": "producto", "species": null},
     "IMG_8319.mov": {"beat": "uso", "species": "perro"},
-    "IMG_8326.mov": {"beat": "resultado", "species": null}
+    "IMG_8326.mov": {"beat": "resultado", "species": null, "subtype": "extraccion"}
   }
 }

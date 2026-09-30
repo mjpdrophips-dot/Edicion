@@ -81,6 +81,7 @@ def load_clip_pool(input_dir, edge_margin, tags=None):
                 continue
             clip["beat"] = tag.get("beat")
             clip["species"] = tag.get("species")
+            clip["subtype"] = tag.get("subtype")
         pool.append(clip)
     if not pool:
         sys.exit("Ningún clip tiene suficiente duración utilizable (o etiquetas) para generar variantes.")
@@ -214,7 +215,24 @@ def enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order):
     return selected_by_beat
 
 
-def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total_budget):
+def enforce_extraction_shot(rng, selected_by_beat, clips_by_beat, beat="resultado", subtype="extraccion"):
+    """Garantiza que el bloque de resultado incluya siempre un plano corto de
+    'extraer el pelo del cepillo', aunque el resto de esa selección sea al azar."""
+    extraction_clips = [c for c in clips_by_beat.get(beat, []) if c.get("subtype") == subtype]
+    if not extraction_clips:
+        return selected_by_beat
+    if any(c.get("subtype") == subtype for c in selected_by_beat.get(beat, [])):
+        return selected_by_beat
+
+    pick = rng.choice(extraction_clips)
+    others = [c for c in selected_by_beat[beat] if c.get("subtype") != subtype]
+    if others:
+        selected_by_beat[beat].remove(rng.choice(others))
+    selected_by_beat[beat].append(pick)
+    return selected_by_beat
+
+
+def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total_budget, extraction_max_duration=1.3):
     """Modo con etiquetas: respeta el orden de beat_order (planteamiento ->
     producto -> uso -> resultado, o el que traiga el JSON) y evita que todos
     los planos de mascota sean de la misma especie."""
@@ -236,6 +254,7 @@ def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total
         selected_by_beat[b] = shuffled[:counts[b]]
 
     selected_by_beat = enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order)
+    selected_by_beat = enforce_extraction_shot(rng, selected_by_beat, clips_by_beat)
 
     durations = plan_fragment_durations(rng, n, total_budget, frag_min, frag_max)
     rng.shuffle(durations)
@@ -245,9 +264,11 @@ def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total
     for b in beat_order:
         for clip in selected_by_beat[b]:
             dur = next(d_iter)
+            if clip.get("subtype") == "extraccion":
+                dur = min(dur, extraction_max_duration)
             latest_start = clip["usable_end"] - dur
             start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
-            fragments.append(make_fragment(clip, start, dur, {"beat": b, "species": clip.get("species")}))
+            fragments.append(make_fragment(clip, start, dur, {"beat": b, "species": clip.get("species"), "subtype": clip.get("subtype")}))
     return fragments
 
 
@@ -283,7 +304,7 @@ def build_variant(rng, pool, beat_order, variant_num, args, tmp_dir, out_dir):
     n_fragments = rng.randint(n_lo, n_hi)
 
     if beat_order:
-        fragments = pick_fragments_narrative(rng, pool, beat_order, n_fragments, args.frag_min, args.frag_max, args.max_duration)
+        fragments = pick_fragments_narrative(rng, pool, beat_order, n_fragments, args.frag_min, args.frag_max, args.max_duration, args.extraction_max_duration)
     else:
         fragments = pick_fragments(rng, pool, n_fragments, args.frag_min, args.frag_max, args.max_duration)
 
@@ -315,6 +336,7 @@ def main():
     parser.add_argument("--frag-max", type=float, default=3.0)
     parser.add_argument("--max-duration", type=float, default=15.0)
     parser.add_argument("--edge-margin", type=float, default=0.4, help="Segundos a evitar al inicio/final de cada clip fuente")
+    parser.add_argument("--extraction-max-duration", type=float, default=1.3, help="Duración máxima del plano de 'extraer el pelo' (modo narrativo)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -342,7 +364,7 @@ def main():
 
         print(f"\nVariante {i:02d} -> {out_path} (duración total: {total:.2f}s, {len(fragments)} fragmentos)")
         for f in fragments:
-            tag_info = f"  [{f['beat']}" + (f"/{f['species']}" if f.get("species") else "") + "]" if "beat" in f else ""
+            tag_info = f"  [{f['beat']}" + (f"/{f['species']}" if f.get("species") else "") + (f"/{f['subtype']}" if f.get("subtype") else "") + "]" if "beat" in f else ""
             print(f"  {os.path.basename(f['path'])}  [{f['start']:.2f}s -> {f['start']+f['duration']:.2f}s]  ({f['duration']:.2f}s){tag_info}")
 
     os.rmdir(tmp_dir)
