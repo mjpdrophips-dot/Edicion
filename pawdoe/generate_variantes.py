@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
 Genera variantes de vídeo corto (formato 9:16, <=15s) combinando fragmentos
-aleatorios de los clips en bruto de un producto.
+de los clips en bruto de un producto.
+
+Sin --tags-file: selección puramente aleatoria (comportamiento original).
+Con --tags-file: sigue un orden narrativo fijo por "beats" (p.ej. planteamiento
+-> producto/vapor -> en uso -> resultado) leído del JSON, y evita que un
+mismo vídeo salga con una sola especie de mascota (todo perro o todo gato)
+cuando el material mezcla varias. Ver clip_tags_v2.json para el formato.
 
 Uso:
     python3 generate_variantes.py --input-dir raw_clips --output-dir output_variantes
-    python3 generate_variantes.py --input-dir raw_clips --num-variants 1   # solo la prueba
+    python3 generate_variantes.py --input-dir raw_clips_v2 --output-dir output_variantes_v2 \\
+        --tags-file clip_tags_v2.json --num-variants 1   # solo la prueba
 
 Requiere ffmpeg y ffprobe en el PATH.
 """
@@ -26,6 +33,8 @@ VF = (
     f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
     f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 )
+
+DEFAULT_BEAT_WEIGHTS = {"intro": 0.20, "producto": 0.20, "uso": 0.40, "resultado": 0.20}
 
 
 def find_clips(input_dir):
@@ -48,7 +57,13 @@ def probe_duration(path):
     return float(json.loads(out.stdout)["format"]["duration"])
 
 
-def load_clip_pool(input_dir, edge_margin):
+def load_tags(tags_file):
+    with open(tags_file) as f:
+        data = json.load(f)
+    return data["beat_order"], data["clips"]
+
+
+def load_clip_pool(input_dir, edge_margin, tags=None):
     """Cada clip aporta un rango [margin, duration-margin] del que se pueden
     tomar fragmentos; clips demasiado cortos para tener margen se usan enteros."""
     pool = []
@@ -58,9 +73,17 @@ def load_clip_pool(input_dir, edge_margin):
         usable_start, usable_end = margin, duration - margin
         if usable_end - usable_start < 1.0:
             continue
-        pool.append({"path": path, "usable_start": usable_start, "usable_end": usable_end})
+        clip = {"path": path, "usable_start": usable_start, "usable_end": usable_end}
+        if tags is not None:
+            tag = tags.get(os.path.basename(path))
+            if tag is None:
+                print(f"Aviso: sin etiqueta narrativa para {os.path.basename(path)}, se excluye del modo narrativo.")
+                continue
+            clip["beat"] = tag.get("beat")
+            clip["species"] = tag.get("species")
+        pool.append(clip)
     if not pool:
-        sys.exit("Ningún clip tiene suficiente duración utilizable.")
+        sys.exit("Ningún clip tiene suficiente duración utilizable (o etiquetas) para generar variantes.")
     return pool
 
 
@@ -120,20 +143,111 @@ def reorder_avoiding_adjacent_sources(rng, fragments, max_tries=50):
     return fragments
 
 
+def make_fragment(clip, start, duration, extra=None):
+    span = clip["usable_end"] - clip["usable_start"]
+    duration = min(duration, span)
+    latest_start = clip["usable_end"] - duration
+    start = start if start <= latest_start else clip["usable_start"]
+    start = max(clip["usable_start"], min(start, latest_start if latest_start > clip["usable_start"] else clip["usable_start"]))
+    frag = {"path": clip["path"], "start": round(start, 2), "duration": round(duration, 2)}
+    if extra:
+        frag.update(extra)
+    return frag
+
+
 def pick_fragments(rng, pool, n, frag_min, frag_max, total_budget):
+    """Modo aleatorio (sin etiquetas): orden y combinación puramente al azar."""
     durations = plan_fragment_durations(rng, n, total_budget, frag_min, frag_max)
     clip_indices = pick_clip_indices(rng, len(pool), n)
 
     fragments = []
     for idx, dur in zip(clip_indices, durations):
         clip = pool[idx]
-        span = clip["usable_end"] - clip["usable_start"]
-        dur = min(dur, span)
         latest_start = clip["usable_end"] - dur
         start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
-        fragments.append({"path": clip["path"], "start": round(start, 2), "duration": round(dur, 2), "pool_index": idx})
+        fragments.append(make_fragment(clip, start, dur, {"pool_index": idx}))
     rng.shuffle(fragments)
     fragments = reorder_avoiding_adjacent_sources(rng, fragments)
+    return fragments
+
+
+def allocate_beat_counts(rng, n, beat_order, weights):
+    counts = {b: 1 for b in beat_order}
+    remaining = n - len(beat_order)
+    if remaining <= 0:
+        return counts
+    raw = {b: weights.get(b, 1.0 / len(beat_order)) * remaining for b in beat_order}
+    floor_alloc = {b: int(raw[b]) for b in beat_order}
+    leftover = remaining - sum(floor_alloc.values())
+    by_frac = sorted(beat_order, key=lambda b: raw[b] - floor_alloc[b], reverse=True)
+    for b in by_frac[:leftover]:
+        floor_alloc[b] += 1
+    for b in beat_order:
+        counts[b] += floor_alloc[b]
+    return counts
+
+
+def enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order):
+    """Si el vídeo terminaría siendo de una sola especie (todo perro o todo
+    gato) y el material fuente ofrece otra especie, cambia un fragmento para
+    mezclarlas."""
+    all_species = [c["species"] for b in beat_order for c in selected_by_beat[b] if c.get("species")]
+    distinct_in_pool = {c["species"] for b in beat_order for c in clips_by_beat[b] if c.get("species")}
+    if len(set(all_species)) != 1 or len(all_species) < 2 or len(distinct_in_pool) <= 1:
+        return selected_by_beat
+
+    majority = all_species[0]
+    candidates = [
+        (b, c) for b in beat_order for c in clips_by_beat[b]
+        if c.get("species") not in (None, majority) and c not in selected_by_beat[b]
+    ]
+    if not candidates:
+        return selected_by_beat
+
+    swap_beat, swap_in = rng.choice(candidates)
+    for b in beat_order:
+        majority_here = [c for c in selected_by_beat[b] if c.get("species") == majority]
+        if majority_here:
+            selected_by_beat[b].remove(rng.choice(majority_here))
+            selected_by_beat[swap_beat].append(swap_in)
+            break
+    return selected_by_beat
+
+
+def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total_budget):
+    """Modo con etiquetas: respeta el orden de beat_order (planteamiento ->
+    producto -> uso -> resultado, o el que traiga el JSON) y evita que todos
+    los planos de mascota sean de la misma especie."""
+    clips_by_beat = {b: [c for c in pool if c.get("beat") == b] for b in beat_order}
+    counts = allocate_beat_counts(rng, n, beat_order, DEFAULT_BEAT_WEIGHTS)
+
+    for b in beat_order:
+        avail = len(clips_by_beat[b])
+        if counts[b] > avail:
+            overflow = counts[b] - avail
+            counts[b] = avail
+            target = max(beat_order, key=lambda x: len(clips_by_beat[x]) - counts[x])
+            counts[target] += overflow
+
+    selected_by_beat = {}
+    for b in beat_order:
+        shuffled = clips_by_beat[b][:]
+        rng.shuffle(shuffled)
+        selected_by_beat[b] = shuffled[:counts[b]]
+
+    selected_by_beat = enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order)
+
+    durations = plan_fragment_durations(rng, n, total_budget, frag_min, frag_max)
+    rng.shuffle(durations)
+    d_iter = iter(durations)
+
+    fragments = []
+    for b in beat_order:
+        for clip in selected_by_beat[b]:
+            dur = next(d_iter)
+            latest_start = clip["usable_end"] - dur
+            start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
+            fragments.append(make_fragment(clip, start, dur, {"beat": b, "species": clip.get("species")}))
     return fragments
 
 
@@ -162,12 +276,16 @@ def concat_fragments(fragment_paths, out_path):
     os.remove(listfile)
 
 
-def build_variant(rng, pool, variant_num, args, tmp_dir, out_dir):
+def build_variant(rng, pool, beat_order, variant_num, args, tmp_dir, out_dir):
     min_feasible = math.ceil(args.max_duration / args.frag_max)
     n_lo = max(args.min_fragments, min_feasible)
     n_hi = max(n_lo, args.max_fragments)
     n_fragments = rng.randint(n_lo, n_hi)
-    fragments = pick_fragments(rng, pool, n_fragments, args.frag_min, args.frag_max, args.max_duration)
+
+    if beat_order:
+        fragments = pick_fragments_narrative(rng, pool, beat_order, n_fragments, args.frag_min, args.frag_max, args.max_duration)
+    else:
+        fragments = pick_fragments(rng, pool, n_fragments, args.frag_min, args.frag_max, args.max_duration)
 
     fragment_paths = []
     for i, frag in enumerate(fragments):
@@ -188,6 +306,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input-dir", default="raw_clips")
     parser.add_argument("--output-dir", default="output_variantes")
+    parser.add_argument("--tags-file", default=None, help="JSON con beat_order + etiquetas por clip (orden narrativo + mezcla de especies)")
     parser.add_argument("--num-variants", type=int, default=20)
     parser.add_argument("--start-at", type=int, default=1, help="Número de variante inicial (para --num-variants 1 de prueba)")
     parser.add_argument("--min-fragments", type=int, default=4)
@@ -203,14 +322,18 @@ def main():
     tmp_dir = os.path.join(args.output_dir, ".tmp_fragments")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    pool = load_clip_pool(args.input_dir, args.edge_margin)
-    print(f"Clips fuente detectados: {len(pool)}")
+    beat_order, tags = (None, None)
+    if args.tags_file:
+        beat_order, tags = load_tags(args.tags_file)
+
+    pool = load_clip_pool(args.input_dir, args.edge_margin, tags)
+    print(f"Clips fuente detectados: {len(pool)}" + (f" (modo narrativo: {' -> '.join(beat_order)})" if beat_order else " (modo aleatorio)"))
 
     seen_signatures = set()
     for i in range(args.start_at, args.start_at + args.num_variants):
         rng = random.Random(args.seed + i)
         for attempt in range(5):
-            out_path, fragments, total = build_variant(rng, pool, i, args, tmp_dir, args.output_dir)
+            out_path, fragments, total = build_variant(rng, pool, beat_order, i, args, tmp_dir, args.output_dir)
             signature = tuple((os.path.basename(f["path"]), round(f["start"], 1)) for f in fragments)
             if signature not in seen_signatures:
                 seen_signatures.add(signature)
@@ -219,7 +342,8 @@ def main():
 
         print(f"\nVariante {i:02d} -> {out_path} (duración total: {total:.2f}s, {len(fragments)} fragmentos)")
         for f in fragments:
-            print(f"  {os.path.basename(f['path'])}  [{f['start']:.2f}s -> {f['start']+f['duration']:.2f}s]  ({f['duration']:.2f}s)")
+            tag_info = f"  [{f['beat']}" + (f"/{f['species']}" if f.get("species") else "") + "]" if "beat" in f else ""
+            print(f"  {os.path.basename(f['path'])}  [{f['start']:.2f}s -> {f['start']+f['duration']:.2f}s]  ({f['duration']:.2f}s){tag_info}")
 
     os.rmdir(tmp_dir)
 
