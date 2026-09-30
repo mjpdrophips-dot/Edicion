@@ -82,6 +82,10 @@ def load_clip_pool(input_dir, edge_margin, tags=None):
             clip["beat"] = tag.get("beat")
             clip["species"] = tag.get("species")
             clip["subtype"] = tag.get("subtype")
+            focus = tag.get("focus")
+            clip["has_focus"] = bool(focus)
+            if focus:
+                clip["usable_start"], clip["usable_end"] = max(margin, focus[0]), min(duration - margin, focus[1])
         pool.append(clip)
     if not pool:
         sys.exit("Ningún clip tiene suficiente duración utilizable (o etiquetas) para generar variantes.")
@@ -268,8 +272,37 @@ def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total
                 dur = min(dur, extraction_max_duration)
             latest_start = clip["usable_end"] - dur
             start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
-            fragments.append(make_fragment(clip, start, dur, {"beat": b, "species": clip.get("species"), "subtype": clip.get("subtype")}))
+            adjustable = not clip.get("has_focus") and clip.get("subtype") != "extraccion"
+            fragments.append(make_fragment(clip, start, dur, {
+                "beat": b, "species": clip.get("species"), "subtype": clip.get("subtype"), "adjustable": adjustable,
+            }))
+
+    _top_up_to_budget(rng, fragments, {c["path"]: c for c in pool}, total_budget, frag_max)
     return fragments
+
+
+def _top_up_to_budget(rng, fragments, clip_by_path, total_budget, frag_max):
+    """Cuando una ventana 'focus' o el tope de extracción deja el total por
+    debajo del objetivo, estira otros fragmentos (los que sí tienen margen)
+    para acercarse de nuevo a total_budget, sin tocar los recortes forzados."""
+    deficit = round(total_budget - sum(f["duration"] for f in fragments), 2)
+    if deficit <= 0.2:
+        return
+    candidates = [f for f in fragments if f.get("adjustable")]
+    rng.shuffle(candidates)
+    for f in candidates:
+        if deficit <= 0.05:
+            break
+        clip = clip_by_path[f["path"]]
+        span_room = (clip["usable_end"] - clip["usable_start"]) - f["duration"]
+        max_extra = min(frag_max - f["duration"], span_room)
+        if max_extra <= 0:
+            continue
+        add = min(max_extra, deficit)
+        f["duration"] = round(f["duration"] + add, 2)
+        if f["start"] + f["duration"] > clip["usable_end"]:
+            f["start"] = round(clip["usable_end"] - f["duration"], 2)
+        deficit = round(deficit - add, 2)
 
 
 def encode_fragment(fragment, out_path):
