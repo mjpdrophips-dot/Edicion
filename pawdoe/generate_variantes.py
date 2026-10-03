@@ -191,10 +191,11 @@ def pick_one(rng, options, exclude):
 
 
 def build_narrative_sequence(rng, pool):
-    """Construye el orden de planos alternando mostrar -> usar para cada
-    mascota (nunca dos planos seguidos de 'solo enseñando el cepillo'),
-    metiendo siempre ambas especies, el llenado de agua y la extracción de
-    pelo. Devuelve [(clip, role), ...] en el orden final."""
+    """Construye el orden de planos en tripletas por mascota: mostrar -> usar
+    -> resultado de ESE cepillado (pelo en el cepillo o quitándolo), nunca
+    dos planos seguidos de 'solo enseñando' ni un cepillado sin su pago
+    inmediato. El llenado de agua separa las dos tripletas. Devuelve
+    [(clip, role), ...] en el orden final."""
     by_beat_species, by_subtype = group_clips(pool)
     species_list = [s for s in ("perro", "gato") if by_beat_species.get(("intro", s)) and by_beat_species.get(("uso", s))]
     rng.shuffle(species_list)
@@ -204,8 +205,6 @@ def build_narrative_sequence(rng, pool):
     producto_all = [c for c in pool if c.get("beat") == "producto"]
     resultado_all = [c for c in pool if c.get("beat") == "resultado"]
     water_pool = by_subtype.get("llenado_agua") or producto_all
-    extraction_pool = by_subtype.get("extraccion") or resultado_all
-    extra_resultado_pool = [c for c in resultado_all if c not in extraction_pool]
 
     used, seq = set(), []
 
@@ -213,17 +212,30 @@ def build_narrative_sequence(rng, pool):
         seq.append((clip, role))
         used.add(clip["path"])
 
+    # Reparte los planos de resultado entre las dos tripletas, garantizando
+    # que al menos una sea la de "quitar el pelo" (no solo pelo en el cepillo).
+    remaining_resultado = resultado_all[:]
+    rng.shuffle(remaining_resultado)
+    result_picks = []
+    for slot in range(2):
+        is_last_slot = slot == 1
+        already_has_extraccion = any(c.get("subtype") == "extraccion" for c in result_picks)
+        candidates = remaining_resultado
+        if is_last_slot and not already_has_extraccion:
+            candidates = [c for c in remaining_resultado if c.get("subtype") == "extraccion"] or remaining_resultado
+        pick = rng.choice(candidates) if candidates else None
+        if pick:
+            result_picks.append(pick)
+            remaining_resultado.remove(pick)
+
     for i, species in enumerate(species_list):
         add(pick_one(rng, by_beat_species[("intro", species)], used))
         add(pick_one(rng, by_beat_species[("uso", species)], used))
-        if rng.random() < 0.4 and len(by_beat_species[("uso", species)]) > 1:
-            add(pick_one(rng, by_beat_species[("uso", species)], used))
+        if i < len(result_picks):
+            result = result_picks[i]
+            add(result, role="extraccion" if result.get("subtype") == "extraccion" else None)
         if i == 0:
             add(pick_one(rng, water_pool, used), role="producto")
-
-    add(pick_one(rng, extraction_pool, used), role="extraccion")
-    if extra_resultado_pool and rng.random() < 0.5:
-        add(pick_one(rng, extra_resultado_pool, used))
 
     return seq
 
@@ -285,7 +297,7 @@ def encode_fragment(fragment, out_path):
         "-t", f"{fragment['duration']:.3f}",
         "-vf", VF, "-r", "30",
         "-c:v", "libx264", "-preset", "medium", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        "-an",
         "-movflags", "+faststart",
         out_path,
     ]
