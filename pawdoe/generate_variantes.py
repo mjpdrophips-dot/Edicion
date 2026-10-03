@@ -34,7 +34,6 @@ VF = (
     f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 )
 
-DEFAULT_BEAT_WEIGHTS = {"intro": 0.20, "producto": 0.20, "uso": 0.40, "resultado": 0.20}
 
 
 def find_clips(input_dir):
@@ -176,106 +175,81 @@ def pick_fragments(rng, pool, n, frag_min, frag_max, total_budget):
     return fragments
 
 
-def allocate_beat_counts(rng, n, beat_order, weights):
-    counts = {b: 1 for b in beat_order}
-    remaining = n - len(beat_order)
-    if remaining <= 0:
-        return counts
-    raw = {b: weights.get(b, 1.0 / len(beat_order)) * remaining for b in beat_order}
-    floor_alloc = {b: int(raw[b]) for b in beat_order}
-    leftover = remaining - sum(floor_alloc.values())
-    by_frac = sorted(beat_order, key=lambda b: raw[b] - floor_alloc[b], reverse=True)
-    for b in by_frac[:leftover]:
-        floor_alloc[b] += 1
-    for b in beat_order:
-        counts[b] += floor_alloc[b]
-    return counts
+def group_clips(pool):
+    by_beat_species = {}
+    by_subtype = {}
+    for c in pool:
+        by_beat_species.setdefault((c.get("beat"), c.get("species")), []).append(c)
+        if c.get("subtype"):
+            by_subtype.setdefault(c["subtype"], []).append(c)
+    return by_beat_species, by_subtype
 
 
-def enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order):
-    """Si el vídeo terminaría siendo de una sola especie (todo perro o todo
-    gato) y el material fuente ofrece otra especie, cambia un fragmento para
-    mezclarlas."""
-    all_species = [c["species"] for b in beat_order for c in selected_by_beat[b] if c.get("species")]
-    distinct_in_pool = {c["species"] for b in beat_order for c in clips_by_beat[b] if c.get("species")}
-    if len(set(all_species)) != 1 or len(all_species) < 2 or len(distinct_in_pool) <= 1:
-        return selected_by_beat
-
-    majority = all_species[0]
-    candidates = [
-        (b, c) for b in beat_order for c in clips_by_beat[b]
-        if c.get("species") not in (None, majority) and c not in selected_by_beat[b]
-    ]
-    if not candidates:
-        return selected_by_beat
-
-    swap_beat, swap_in = rng.choice(candidates)
-    for b in beat_order:
-        majority_here = [c for c in selected_by_beat[b] if c.get("species") == majority]
-        if majority_here:
-            selected_by_beat[b].remove(rng.choice(majority_here))
-            selected_by_beat[swap_beat].append(swap_in)
-            break
-    return selected_by_beat
+def pick_one(rng, options, exclude):
+    choices = [c for c in options if c["path"] not in exclude] or options
+    return rng.choice(choices)
 
 
-def enforce_extraction_shot(rng, selected_by_beat, clips_by_beat, beat="resultado", subtype="extraccion"):
-    """Garantiza que el bloque de resultado incluya siempre un plano corto de
-    'extraer el pelo del cepillo', aunque el resto de esa selección sea al azar."""
-    extraction_clips = [c for c in clips_by_beat.get(beat, []) if c.get("subtype") == subtype]
-    if not extraction_clips:
-        return selected_by_beat
-    if any(c.get("subtype") == subtype for c in selected_by_beat.get(beat, [])):
-        return selected_by_beat
+def build_narrative_sequence(rng, pool):
+    """Construye el orden de planos alternando mostrar -> usar para cada
+    mascota (nunca dos planos seguidos de 'solo enseñando el cepillo'),
+    metiendo siempre ambas especies, el llenado de agua y la extracción de
+    pelo. Devuelve [(clip, role), ...] en el orden final."""
+    by_beat_species, by_subtype = group_clips(pool)
+    species_list = [s for s in ("perro", "gato") if by_beat_species.get(("intro", s)) and by_beat_species.get(("uso", s))]
+    rng.shuffle(species_list)
+    if len(species_list) < 2:
+        species_list = (species_list * 2)[:2]
 
-    pick = rng.choice(extraction_clips)
-    others = [c for c in selected_by_beat[beat] if c.get("subtype") != subtype]
-    if others:
-        selected_by_beat[beat].remove(rng.choice(others))
-    selected_by_beat[beat].append(pick)
-    return selected_by_beat
+    producto_all = [c for c in pool if c.get("beat") == "producto"]
+    resultado_all = [c for c in pool if c.get("beat") == "resultado"]
+    water_pool = by_subtype.get("llenado_agua") or producto_all
+    extraction_pool = by_subtype.get("extraccion") or resultado_all
+    extra_resultado_pool = [c for c in resultado_all if c not in extraction_pool]
+
+    used, seq = set(), []
+
+    def add(clip, role=None):
+        seq.append((clip, role))
+        used.add(clip["path"])
+
+    for i, species in enumerate(species_list):
+        add(pick_one(rng, by_beat_species[("intro", species)], used))
+        add(pick_one(rng, by_beat_species[("uso", species)], used))
+        if rng.random() < 0.4 and len(by_beat_species[("uso", species)]) > 1:
+            add(pick_one(rng, by_beat_species[("uso", species)], used))
+        if i == 0:
+            add(pick_one(rng, water_pool, used), role="producto")
+
+    add(pick_one(rng, extraction_pool, used), role="extraccion")
+    if extra_resultado_pool and rng.random() < 0.5:
+        add(pick_one(rng, extra_resultado_pool, used))
+
+    return seq
 
 
-def pick_fragments_narrative(rng, pool, beat_order, n, frag_min, frag_max, total_budget, extraction_max_duration=1.3):
-    """Modo con etiquetas: respeta el orden de beat_order (planteamiento ->
-    producto -> uso -> resultado, o el que traiga el JSON) y evita que todos
-    los planos de mascota sean de la misma especie."""
-    clips_by_beat = {b: [c for c in pool if c.get("beat") == b] for b in beat_order}
-    counts = allocate_beat_counts(rng, n, beat_order, DEFAULT_BEAT_WEIGHTS)
-
-    for b in beat_order:
-        avail = len(clips_by_beat[b])
-        if counts[b] > avail:
-            overflow = counts[b] - avail
-            counts[b] = avail
-            target = max(beat_order, key=lambda x: len(clips_by_beat[x]) - counts[x])
-            counts[target] += overflow
-
-    selected_by_beat = {}
-    for b in beat_order:
-        shuffled = clips_by_beat[b][:]
-        rng.shuffle(shuffled)
-        selected_by_beat[b] = shuffled[:counts[b]]
-
-    selected_by_beat = enforce_species_diversity(rng, selected_by_beat, clips_by_beat, beat_order)
-    selected_by_beat = enforce_extraction_shot(rng, selected_by_beat, clips_by_beat)
+def pick_fragments_narrative(rng, pool, beat_order, frag_min, frag_max, total_budget, extraction_max_duration=1.3):
+    """Modo con etiquetas: alterna mostrar/usar por mascota (ver
+    build_narrative_sequence) en vez de agrupar todos los planos del mismo
+    tipo seguidos."""
+    sequence = build_narrative_sequence(rng, pool)
+    n = len(sequence)
 
     durations = plan_fragment_durations(rng, n, total_budget, frag_min, frag_max)
     rng.shuffle(durations)
     d_iter = iter(durations)
 
     fragments = []
-    for b in beat_order:
-        for clip in selected_by_beat[b]:
-            dur = next(d_iter)
-            if clip.get("subtype") == "extraccion":
-                dur = min(dur, extraction_max_duration)
-            latest_start = clip["usable_end"] - dur
-            start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
-            adjustable = not clip.get("has_focus") and clip.get("subtype") != "extraccion"
-            fragments.append(make_fragment(clip, start, dur, {
-                "beat": b, "species": clip.get("species"), "subtype": clip.get("subtype"), "adjustable": adjustable,
-            }))
+    for clip, role in sequence:
+        dur = next(d_iter)
+        if role == "extraccion":
+            dur = min(dur, extraction_max_duration)
+        latest_start = clip["usable_end"] - dur
+        start = rng.uniform(clip["usable_start"], latest_start) if latest_start > clip["usable_start"] else clip["usable_start"]
+        adjustable = not clip.get("has_focus") and role != "extraccion"
+        fragments.append(make_fragment(clip, start, dur, {
+            "beat": clip.get("beat"), "species": clip.get("species"), "subtype": clip.get("subtype"), "adjustable": adjustable,
+        }))
 
     _top_up_to_budget(rng, fragments, {c["path"]: c for c in pool}, total_budget, frag_max)
     return fragments
@@ -331,14 +305,13 @@ def concat_fragments(fragment_paths, out_path):
 
 
 def build_variant(rng, pool, beat_order, variant_num, args, tmp_dir, out_dir):
-    min_feasible = math.ceil(args.max_duration / args.frag_max)
-    n_lo = max(args.min_fragments, min_feasible)
-    n_hi = max(n_lo, args.max_fragments)
-    n_fragments = rng.randint(n_lo, n_hi)
-
     if beat_order:
-        fragments = pick_fragments_narrative(rng, pool, beat_order, n_fragments, args.frag_min, args.frag_max, args.max_duration, args.extraction_max_duration)
+        fragments = pick_fragments_narrative(rng, pool, beat_order, args.frag_min, args.frag_max, args.max_duration, args.extraction_max_duration)
     else:
+        min_feasible = math.ceil(args.max_duration / args.frag_max)
+        n_lo = max(args.min_fragments, min_feasible)
+        n_hi = max(n_lo, args.max_fragments)
+        n_fragments = rng.randint(n_lo, n_hi)
         fragments = pick_fragments(rng, pool, n_fragments, args.frag_min, args.frag_max, args.max_duration)
 
     fragment_paths = []
