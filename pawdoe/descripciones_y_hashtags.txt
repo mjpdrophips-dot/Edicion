@@ -89,14 +89,13 @@ Facebook (top 5 dentro de la lista completa de arriba, que al no tener
 límite puedes usar entera): #MascotasFelices #CuidadoDeMascotas #PerrosYGatos
 #ProductosParaMascotas #AmorPorLasMascotas
 
-=== YOUTUBE: cálculo con tu CTA fija ===
-Tu frase habitual "Hazte con el tuyo en PawDoe 🔗" son 7 palabras. Sobre el
-límite de 100 que usas, te quedan ~93 palabras libres — de sobra para
-hashtags (cada uno cuenta como 1 palabra) y aun así dejar sitio a una
-línea de descripción. Con esto de margen, una lista de 15 hashtags es
-más que generosa y sigue siendo manejable (meter 50-90 solo por rellenar
-palabra no ayuda al algoritmo, aunque "quepa"):
+=== YOUTUBE: cálculo con tu CTA fija (100 CARACTERES, no palabras) ===
+Tu frase habitual "Hazte con el tuyo en PawDoe 🔗" son 29 caracteres
+(contando espacios y el emoji). Sobre tu tope de 100, te quedan 71
+caracteres libres para hashtags — ahí caben unos 7 cortos, no mucho más:
 
-#Shorts #PetsOfYouTube #DogShorts #CatShorts #PetCare #AmazonMustHaves
-#ProductReview #Mascotas #PerrosYGatos #PetTok #MascotasFelices
-#CuidadoDeMascotas #TiendaOnline #MustHave #AmazonFinds
+#Shorts #PetTok #PetCare #Mascotas #MustHave #PetsOfYouTube #DogShorts
+
+(frase + estos 7 hashtags = 100 caracteres exactos). Si quieres cambiar
+alguno por otro más largo, quita uno de la lista para que siga cabiendo —
+por ejemplo #AmazonFinds o #ProductReview en vez de #DogShorts.
